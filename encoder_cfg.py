@@ -4,17 +4,20 @@ import datetime
 import socket
 import re
 
-#Used for finding your (nonlocalhost) lan ip
+# Used for finding your (nonlocalhost) lan ip
 lan_regex = '192\.168\.5\..*'
 
+# The ip:port that pyro naming runs on
 pyro_host = '192.168.5.195'
 pyro_port = 9005
 
+# FTP server connection info
 ftp_host = '192.168.5.195'
 ftp_port = 9004
 ftp_user = 'dist'
 ftp_pass = 'encoder'
 
+# Valid engine states
 IDLE = 'idle'
 RUNNING = 'running'
 
@@ -22,11 +25,17 @@ RUNNING = 'running'
 max_tries = 5
 
 def getLanIP():
+    """
+        Used to attempt to grab the system's non 127.0.0.1 IP using the lan_regex property
+    """
     for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
         if re.search(lan_regex,ip):
             return ip
 
 class Task(object):
+    """
+        The common task object which all the components use
+    """
     def __init__(self,name,encoder,format,large,quality):
         self.name = name
         self.encoder = encoder

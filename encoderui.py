@@ -7,7 +7,6 @@ import Pyro4
 import os
 import threading
 from encoder_cfg import pyro_host, pyro_port, ftp_host, ftp_port, ftp_user, ftp_pass
-from encoder_cfg import IDLE, RUNNING, Task
 from ftplib import FTP
 import textwrap
 
@@ -23,53 +22,80 @@ class TaskTable(wx.grid.PyGridTableBase):
     def __init__(self, data, rowLabels=None, colLabels=None):
         wx.grid.PyGridTableBase.__init__(self)
         self.data = data
+
+        #Mapping to keep track of which task occupies which row
         self.rowMapping = {}
+        
         self.rowLabels = rowLabels
         self.colLabels = colLabels
 
     def sortData(self,data):
+        # Sorting goes Encoding Tasks > Pending Tasks > Finished > Cancelled > Error
+        # Tasks in the same state are then compared by the datetime they were added
+        # to the server.
         data =  sorted(data, key=lambda x: statusMapping[x[1]]+str(x[6]))
         return data
         
     def updateData(self,data,grid):
+        # Old number of rows
         start = len(self.data)
+
+        # New number of rows
         end = len(data)
-        newRows = []
+
+        # Names we actually hit this time -- used to delete old references later
         updatedNames = []
+
+        # Currently selected tasks in the table
         selectedNames = []
         for row in grid.GetSelectedRows():
             selectedNames.append(self.data[row][0])
+
         data = self.sortData(data)
+
+        # Batch mode ensures all updates happen at once
+        grid.BeginBatch()
+
+        # Map each row from the new data object onto the current data object
+        # and set the corresponding values on the wx.Grid
         for row, info in enumerate(data):
-            name, status, nsName, completed, started, finished, added = info
-            updatedNames.append(name)
-            self.rowMapping[name] = row
+            updatedNames.append(info[0])
+            if row < len(self.data):
+                # Nothing has changed, don't waste cycles remapping the same data
+                if data[row] == self.data[row]:
+                    continue
+            self.rowMapping[info[0]] = row
+            # We're short some rows, append the data instead of mapping
             if row >= len(self.data):
-                self.data.append([name,status,nsName,completed,started,finished,added])
-            self.SetValue(row,1,status)
-            self.SetValue(row,2,nsName)
-            self.SetValue(row,3,completed)
-            self.SetValue(row,4,started)
-            self.SetValue(row,5,finished)
-            self.data[row] = [name,status,nsName,completed,started,finished,added]
-        for row in newRows:
-            self.data.append(row)
-            rowNum = self.data.index(row)
-            self.rowMapping[row[0]]=rowNum
+                self.data.append(info)
+            else:
+                self.data[row] = info
+            # Map this row onto the grid
             for i in xrange(0,6):
-                self.SetValue(row,i,row[i])
+                self.SetValue(row,i,info[i])
+        # Grid updates done, end the batch
+        grid.EndBatch()
+
+        # Delete unused references in the rowMapping dictionary
         for name in self.rowMapping.keys():
             if name not in updatedNames:
                 del self.rowMapping[name]
+
+        # Clear selection and reselect any previously selected
+        # tasks which still exist somewhere in the grid
         grid.ClearSelection()
         for name in selectedNames:
             if name in self.rowMapping:
                 grid.SelectRow(self.rowMapping[name],True)
-        for row in xrange(end,start):
-            del self.data[row]
+
+        # We've got too many rows, inform the grid that it needs to delete some
         if end < start:
+            for row in xrange(end,start):
+                del self.data[row]
             msg = wx.grid.GridTableMessage(self,wx.grid.GRIDTABLE_NOTIFY_ROWS_DELETED,end,start-end)
             grid.ProcessTableMessage(msg)
+
+        # We're short one or more rows, inform the grid it needs to add some
         elif end > start:
             msg = wx.grid.GridTableMessage(self,wx.grid.GRIDTABLE_NOTIFY_ROWS_APPENDED,end-start)
             grid.ProcessTableMessage(msg)
@@ -79,10 +105,6 @@ class TaskTable(wx.grid.PyGridTableBase):
     
     def GetNumberCols(self):
         return len(self.colLabels)
-        #try:
-        #    return len(self.data[0])
-        #except IndexError:
-        #    return 0
         
     def GetColLabelValue(self,col):
         if self.colLabels:
@@ -94,7 +116,6 @@ class TaskTable(wx.grid.PyGridTableBase):
         return ''
         
     def IsEmptyCell(self,row,col):
-        #return bool(self.data[row][col])
         return False
     
     def getRows(self,rows):
@@ -112,9 +133,6 @@ class TaskTable(wx.grid.PyGridTableBase):
     
     def SetValue(self,row,col,value):
         pass
-    
-    #def GetTypeName(self,row,col):
-     #   return type(self.data[row][col])
 
     
 class TaskGrid(wx.grid.Grid):
@@ -122,19 +140,28 @@ class TaskGrid(wx.grid.Grid):
         wx.grid.Grid.__init__(self,parent,-1)
         self.rowLabels = rowLabels
         self.colLabels = colLabels
-        #self.SetData(data)
+
+        # We don't give the table the data initially as all the logic
+        # for correctly sorting + mapping is in the setdata function
         self.SetTable(TaskTable([],self.rowLabels,self.colLabels))
         self.SetData(data)
-        #self.AutoSizeColumns(setAsMin=True)
-        #self.AutoSizeRows()
+
+        # TODO -- Revisit these sizes, kind of ugly on Linux
         self.SetColSize(0,300)
         self.SetColSize(1,50)
         self.SetColSize(2,150)
         self.SetColSize(3,70)
         self.SetColSize(4,150)
         self.SetColSize(5,150)
+
+        # We have no row labels and they take up a good amount of space by default
         self.SetRowLabelSize(0)
+
+        # You cannot edit, you lose, good day, sir.
         self.EnableEditing(False)
+
+        # This will select whole rows at a time, which makes sense for our needs
+        # since each row is a task and tasks are the atomic unit
         self.SetSelectionMode(1)
         
     def getRows(self,rows):
@@ -142,33 +169,57 @@ class TaskGrid(wx.grid.Grid):
         
     def SetData(self,data):
         self.GetTable().updateData(data,self)
-        #self.SetTable(TaskTable(data,self.rowLabels,self.colLabels))
-        #self.AutoSizeColumns(setAsMin=True)
-        #self.AutoSizeRows()
-        #self.EnableEditing(False)
+        # Grid will not reflect changes made until forcerefresh is called
         self.ForceRefresh()
 
 class taskViewDialog(wx.Dialog):
+    """ A quick dialog to that gives a detailed view of selected task(s)
+        This view provides extra data compared to that displayed directly
+        in the table:
+            - encoder
+            - large file support
+            - quality setting
+            - format
+            - Task added datetime
+    """
     def __init__(self,parent,rows,table):
         self._parent = parent
         self._table = table
         self.rows = rows
+
+        # Nothing to show, just quit
         if not rows or not table:
             self.Close()
+
+        # Grab the selected rows from the table so we know what to display
         rows = table.getRows(rows)
         tasks = []
+
+        # Grab the global list of tasks from the central server
+        # TODO -- This is a little hackish, maybe the table could
+        # hold a mapping that contains the actual task objects
+        # that way we could avoid the extra call to the server
+        # which is already happening every few seconds anyway
         tasksIn = self._parent.central.getTasks()
+
+        # Grab the task objects matching the selected rows
         for row in rows:
             if row[0] in tasksIn:
                 tasks.append(row[0])
+
+        # Got no tasks, they may have been removed, either way
+        # we've got nothing, close 'er up
         if not tasks:
             self.Close()
         label = 'Detailed Task View'
         wx.Dialog.__init__(self,parent,-1,label,wx.DefaultPosition,wx.Size(310,400))
 
         mainBox = wx.BoxSizer(wx.VERTICAL)
+
+        # TODO -- Sizing is ugly in Linux
         self.taskChooser = wx.ListBox(self,-1,style=wx.LB_HSCROLL|wx.LB_SINGLE,size=wx.Size(250,100))
-        #self.taskChooser = wx.ComboBox(self,-1,tasks[0],choices=tasks,size=wx.Size(400,100),style=wx.CB_READONLY|wx.CB_SORT|wx.CB_DROPDOWN)
+
+        # General Task Info
         taskPanel = wx.Panel(self,-1)
         taskSizer = wx.FlexGridSizer(rows=12,cols=2,hgap=10,vgap=5)
         taskNameLabel = wx.StaticText(taskPanel,label='Name:')
@@ -187,7 +238,7 @@ class taskViewDialog(wx.Dialog):
         self.taskStarted = wx.StaticText(taskPanel,label='')
         taskFinishedLabel = wx.StaticText(taskPanel,label='Finished:')
         self.taskFinished = wx.StaticText(taskPanel,label='')
-        ### HB Info
+        ### HB Settings
         taskEncLabel = wx.StaticText(taskPanel,label='Encoder:')
         self.taskEnc = wx.StaticText(taskPanel,label='')
         taskFormatLabel = wx.StaticText(taskPanel,label='Format:')
@@ -208,17 +259,16 @@ class taskViewDialog(wx.Dialog):
 
         self.tasksIn = tasksIn
 
-        #self.changed()
-
         close = wx.Button(self,-1,'Close')
-
+        
         mainBox.Add(self.taskChooser)
         mainBox.Add(taskPanel)
         mainBox.Add(close)
-
         self.SetSizer(mainBox)
+        
         for task in tasks:
             self.taskChooser.Insert(task,0)
+
         self.tasks = tasks
         self.changed()
         self.taskChooser.SetSelection(0)
@@ -226,13 +276,15 @@ class taskViewDialog(wx.Dialog):
         self.Bind(wx.EVT_LISTBOX,self.changed,self.taskChooser)
 
     def changed(self,evt=None):
+        # Which task is selected?
         id = self.tasks[self.taskChooser.GetSelection()]
         task,encoder,status = self.tasksIn[id]
+
+        # Display task's info
         self.taskName.SetLabel('\n'.join(textwrap.wrap(id,35)))
         if task.getOutputName():
             self.taskOutName.SetLabel('\n'.join(textwrap.wrap(task.getOutputName(),35)))
         self.taskAdded.SetLabel(str(task.getAdded()))
-        #self.taskOutName.SetLabel(task.getOutputName())
         self.taskStatus.SetLabel(status)
         if encoder:
             self.taskEncoder.SetLabel(encoder)
@@ -250,6 +302,10 @@ class taskViewDialog(wx.Dialog):
         self.Close()
 
 class addEncodeDialog(wx.Dialog):
+    """ A quick dialog for adding new encode tasks to the server
+        Allows you to add multiple videos at once and specify
+        a few HB encoding settings -- just a few for now
+    """
     def __init__(self,parent):
         self._parent = parent
         label = 'Add Encode'
@@ -324,6 +380,10 @@ class addEncodeDialog(wx.Dialog):
             self._parent.addVideos(encoder,format,large,quality,files,dir)
 
     def addVid(self,event):
+        # TODO -- This currently clears out any videos already selected, it would probably
+        # make more sense for this to just append -- the clear button should handle clearing
+        # TODO -- Get a more extensive list of support videos based on HB support and add it to one
+        # file that's just called Video Files
         diag = wx.FileDialog(self,'Select video(s) to add',style=wx.FD_OPEN|wx.FD_MULTIPLE,
                              wildcard="Videos files(*.flv)|*.flv|AVI files(*.avi)|*.avi|MKV files(*.mkv)|*.mkv")
         if diag.ShowModal() == wx.ID_OK:
@@ -340,18 +400,24 @@ class addEncodeDialog(wx.Dialog):
         self.changeList()
         
     def changeList(self,event=None):
-        """ populates the listbox with the skip list of the valid extension list depending on whath as been selected """
+        """ populates the listbox with the current list of added video files """
         self.vidBox.Clear()
         for item in self.vids:
             self.vidBox.Insert(item,0,None)
 
 class EncoderFrame(wx.Frame):
+    """ The Main UI element
+    """
     def __init__(self,parent,ID,title,position,size):
         wx.Frame.__init__(self,parent,ID,title,position,size)
         self.mgr = aui.AuiManager(self)
         taskPanel = wx.Panel(self,-1,size=(350,300))
         taskBox = wx.BoxSizer(wx.VERTICAL)
+
+        # Check in with the central dispatch (should be defined in encoder_cfg.py)
+        # if you aren't running a server, terrible things will happen here
         self.central = Pyro4.Proxy('PYRONAME:central.encoding@{0}:{1}'.format(pyro_host,pyro_port))
+        
         self.ids = {
                     'taskList': wx.NewId(),
                     'addFolder': wx.NewId(),
@@ -363,17 +429,28 @@ class EncoderFrame(wx.Frame):
                     'clear':wx.NewId(),
                     'retry': wx.NewId(),
                     }
-        self.working = False
+
+        # Our working dialog for display when we're busy FTP'ing files around
         self.workingDiag = None
+
+        # Thread reference to the thread which will perform the actual FTP operations
         self.currThread = None
+
+        # Counts the videos we've FTP'ed so far -- assuming we've added multiple videos
         self.workingTotal = 0
+
+        # Would be used for cancelling adding -- if that were implemented
+        # TODO -- Implement cancelling of FTP / Add Task Operation
         self.needCancel = False
+
+        # List of video files we still need to FTP and add tasks for
         self.pendingSends = []
-        #self.taskList = easyListCtrl(taskPanel, self.ids['taskList'], mode=easyListCtrl.TASKS, single=False, borders=False)
+
+        # The main table display which contains all the tasks
         self.taskList = TaskGrid(taskPanel,self.getData(),rowLabels=None,colLabels=['Task Name','Status','Assigned Encoder','Completed','Started','Finished'])
-        #self.taskList.AutoSize()
-        #self.refreshList()
+        
         taskBox.Add(self.taskList,1,wx.EXPAND|wx.ALL)
+
         hudtoolbar = aui.AuiToolBar(self,-1,wx.DefaultPosition,size=(1000,-1),agwStyle=aui.AUI_TB_DEFAULT_STYLE | aui.AUI_TB_NO_AUTORESIZE | aui.AUI_TB_OVERFLOW | aui.AUI_TB_TEXT | aui.AUI_TBTOOL_TEXT_BOTTOM)
         hudtoolbar.SetToolBitmapSize(wx.Size(40,40))
         hudtoolbar.AddSimpleTool(self.ids['add'],'Add Encode',wx.ArtProvider.GetBitmap(wx.ART_ADD_BOOKMARK))
@@ -382,14 +459,20 @@ class EncoderFrame(wx.Frame):
         hudtoolbar.AddSimpleTool(self.ids['retry'],'Retry',wx.ArtProvider.GetBitmap(wx.ART_REDO))
         hudtoolbar.AddSimpleTool(self.ids['cancel'],'Cancel',wx.ArtProvider.GetBitmap(wx.ART_DELETE))
         hudtoolbar.Realize()
+
         taskPanel.SetSizer(taskBox)
+        
         self.mgr.AddPane(hudtoolbar, aui.AuiPaneInfo().ToolbarPane().Top().Row(1).Gripper(False))
         self.mgr.AddPane(taskPanel, aui.AuiPaneInfo().Center().Floatable(False).MaximizeButton(False).CaptionVisible(False).CloseButton(False))
         self.mgr.SetDockSizeConstraint(.5,.5)
         self.mgr.Update()
         self.Centre()
+
+        # This timer will update the table with the latest and greatest list of tasks
+        # from the central server every 4000ms
         self.timer = wx.Timer(self,self.ids['taskTimer'])
         self.timer.Start(4000)
+        
         wx.EVT_TIMER(self,self.ids['taskTimer'],self.refreshList)
         wx.EVT_TOOL(self,self.ids['cancel'],self.cancel)
         wx.EVT_TOOL(self,self.ids['add'],self.add)
@@ -397,7 +480,6 @@ class EncoderFrame(wx.Frame):
         wx.EVT_TOOL(self,self.ids['clear'],self.clear)
         wx.EVT_TOOL(self,self.ids['retry'],self.retry)
         self.taskList.Bind(wx.grid.EVT_GRID_CELL_LEFT_CLICK,self.handleClick)
-        #self.Bind(wx.EVT_IDLE,self.OnIdle)
 
     def view(self,evt=None):
         taskViewDialog(self,self.taskList.GetSelectedRows(),self.taskList).ShowModal()
@@ -412,6 +494,8 @@ class EncoderFrame(wx.Frame):
         return settings
 
     def addVideos(self,encoder,format,large,quality,files,dir):
+        """ Kick off the first FTP thread and show a progress dialog
+        """
         self.pendingSends = zip([dir]*len(files),files)
         if not self.pendingSends:
             return
@@ -421,8 +505,12 @@ class EncoderFrame(wx.Frame):
         self.workingTotal = 0
         self.workingDiag = wx.ProgressDialog('Transfering','Transfering videos to central server',len(files),self,style=wx.PD_ELAPSED_TIME|wx.PD_SMOOTH|wx.PD_AUTO_HIDE)
         self.workingDiag.ShowModal()
-        
+
     def getClosestRow(self,row):
+        """ Used for calculating Grid selections
+            since the grid selection model, even
+            when using row only selection, completely
+            sucks """
         min = None
         minVal = None
         for rowSel in self.taskList.GetSelectedRows():
@@ -439,6 +527,12 @@ class EncoderFrame(wx.Frame):
         return min
         
     def handleClick(self,event):
+        """ Custom click handling for the wx.Grid so
+            rows are actually selected when you click
+            on them
+        """
+
+        #TODO -- Make shift-clicking perform more like you'd expect
         row = event.GetRow()
         if event.ControlDown():
             if row in self.taskList.GetSelectedRows():
@@ -456,6 +550,8 @@ class EncoderFrame(wx.Frame):
             self.taskList.SelectRow(row,True)
 
     def clear(self,evt):
+        """ Clear selected non-active/pending tasks from the table & central server
+        """
         for task in self.taskList.getRows((self.taskList.GetSelectedRows())):
             if task[1] in ['Cancelled','Error','Finished']:
                 if not self.central.clearTask(task[0]):
@@ -466,6 +562,8 @@ class EncoderFrame(wx.Frame):
                 break
         
     def cancel(self,evt):
+        """ Cancel selected pending/active tasks from the server
+        """
         for task in self.taskList.getRows(self.taskList.GetSelectedRows()):
             if task[1] in ['Pending','Encoding']:
                 if not self.central.cancelTask(task[0]):
@@ -476,6 +574,9 @@ class EncoderFrame(wx.Frame):
                 break
 
     def retry(self,evt):
+        """
+            Retry selected errored or cancelled tasks
+        """
         for task in self.taskList.getRows(self.taskList.GetSelectedRows()):
             if task[1] in ['Cancelled','Error']:
                 if not self.central.retryTask(task[0]):
@@ -488,13 +589,14 @@ class EncoderFrame(wx.Frame):
     def add(self,evt):
         diag = addEncodeDialog(self)
         diag.ShowModal()
-                
-    def isActive(self):
-        if self.currThread:
-            return self.currThread.isAlive()
-        return False
     
     def threadDone(self,settings,vid,evt=None):
+        """
+            Called by FTP thread upon completion, if we have more videos to send
+            kick off the next thread and update the progress dialog so the user knows
+            what's going on
+        """
+        # TODO -- This is where we need to check for a signal that a cancellation has been requested
         self.currThread.join()
         self.currThread = None
         self.central.addTask(vid,**settings)
@@ -510,6 +612,11 @@ class EncoderFrame(wx.Frame):
                 self.currThread.start()
                 
     def threadedSend(self,settings,dir,vid):
+        """
+            Fire up an FTP connection to the central server
+            and upload the videos from the localhost that need
+            to be encoded
+        """
         ftp = FTP()
         ftp.connect(ftp_host,ftp_port)
         ftp.login(ftp_user, ftp_pass)
@@ -519,6 +626,10 @@ class EncoderFrame(wx.Frame):
         wx.CallAfter(self.threadDone,settings,vid)
     
     def getData(self):
+        """
+            Grab the list of tasks from the central server and put them into a more
+            grid friendly form factor
+        """
         tasks = self.central.getTasks()
         data = []
         for task,name,status in tasks.values():
@@ -527,29 +638,10 @@ class EncoderFrame(wx.Frame):
         return data
 
     def refreshList(self,evt=None):
-        
+        """
+            Push the latest task info to the grid
+        """
         self.taskList.SetData(self.getData())
-
-class FTPThread(threading.Thread):
-    def __init__(self,dir,vid):
-        Thread.__init__(self)
-        self.dir = dir
-        self.vid = vid
-        self.start()
-        
-    def run(self):
-        self.sendVideo(self.dir,self.vid)
-        return
-    
-    def getFile(self):
-        return self.vid
-    
-    def sendVideo(self,dir,file):
-        ftp = FTP()
-        ftp.connect(ftp_host,ftp_port)
-        ftp.login(ftp_user, ftp_pass)
-        ftp.storbinary('STOR {0}'.format(file),open(os.path.join(dir,file),'rb'))
-    
 
 class EncoderApp(wx.App):
     def OnInit(self):
@@ -561,7 +653,6 @@ class EncoderApp(wx.App):
 def main():
     wxobj = EncoderApp(False)
     wxobj.MainLoop()
-    
 
 if __name__ == '__main__':
     main()
