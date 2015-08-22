@@ -1,0 +1,1 @@
+A platform independent set of scripts which farm out handbrake encoding tasks to computers over your LAN via Pyro and FTP. Requires pyftpdlib, Pyro4, and wxPython.
